@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Sensitive data: anything containing raw Twitter user IDs or voter-file
+# records must never be committed / distributed.
+# ---------------------------------------------------------------------------
+
+# Files not needed by results_w_preloaded_data.R (raw panel/voter data,
+# pipeline intermediates, and auxiliary inputs to results.R / 02_analysis.R)
+data/ignore/
+
+# Data files required by results_w_preloaded_data.R. These are influencer-
+# (not panelist-) level, but still contain Twitter account IDs; do not commit
+# until/unless they have been anonymized for release (see README).
+data/infl_w_tweet_count.parquet
+data/tweet_counts.parquet
+data/kenny_influencer_data_new_age_info.parquet
+data/creators_with_centralities_no_zero_weight_edges.parquet
+
+# Script outputs containing user IDs (written to the repo root by 00/01/01c)
+influencers.csv
+top_users.csv
+adjacency_mat.csv
+user_to_group_cnt.csv
+user_grp_cnt/
+sept2020/
+agg_res_following/
+
+# Unsanitized original of 00_decahose_keyword_counts.py (lab-internal paths
+# and exploratory cells with user IDs)
+decahose.ipynb
+
+# Fitted VSP models (embed the user-ID-indexed matrices)
+*.rdata
+*.RData
+
+# ---------------------------------------------------------------------------
+# Housekeeping
+# ---------------------------------------------------------------------------
+.DS_Store
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+.Rproj.user/
+.Rhistory
+img/
