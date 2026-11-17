@@ -17,11 +17,16 @@
 #     each keyword regex type (pol / blm / total)
 #   - kenny_influencer_data_new_age_info.parquet: per-influencer audience
 #     demographics (age, race, party, gender), aggregated from the panel
-#   - creators_with_centralities_no_zero_weight_edges.parquet: per-influencer
-#     approximate random-walk betweenness centrality in the follow network
+#   - creators_with_centralities_shared_count.parquet: per-creator
+#     approximate current-flow betweenness centrality within its longitudinal
+#     public's shared-audience graph (03a/03b scripts; CENTRALITY_FILE below)
+#   - rq2b_boot_curves.rds (optional): cached bootstrap for img/rq2b.pdf; if
+#     present and it matches the fitted model, the ~4.5 h bootstrap is skipped
 #
-# Outputs: img/rq2a_time.pdf, img/rq2.pdf, img/rq2a_audience.pdf,
-# img/rq2b.pdf, and the LaTeX regression tables printed to the console.
+# Outputs: img/aud_diff.pdf, img/aud_diff_political.pdf,
+# img/rq2a_time_raw.pdf, img/rq2a_time_model.pdf, img/rq2.pdf,
+# img/rq2a_audience.pdf, img/rq2b.pdf; table_F2.tex and table_G3.tex; other
+# regression tables printed to the console as LaTeX.
 #
 # Terminology used in comments below:
 #   - LP  = longitudinal public (a flock/cluster; `meta` is its high-level
@@ -31,6 +36,14 @@
 
 source("util.r")
 library(xtable)
+
+# Creator betweenness centralities used in RQ2c (paper numbering).
+# Original file: edge weight = 1/shared audience, networkx default
+#   epsilon=0.5 (~32 sampled pairs per cluster), no seed.
+# Recomputed file (03b_creator_centralities.py): edge weight = shared audience
+#   (current-flow weights are conductances), epsilon=0.1, seed 779.
+# CENTRALITY_FILE <- "data/creators_with_centralities_no_zero_weight_edges.parquet"
+CENTRALITY_FILE <- "data/creators_with_centralities_shared_count.parquet"
 
 # All figures are written here
 dir.create("img", showWarnings = FALSE)
@@ -131,7 +144,7 @@ rq2a[, par_diff := rep-dem]
 p_data <- melt(rq2a, id="meta",c("age","par_diff","male"))
 p_data[, variable := factor(variable,
                             labels=c("Mean Age",
-                                     "% Dem. - % Rep.",
+                                     "% Rep. - % Dem.",
                                      "% Male"))]
 plt <- ggplot(p_data, aes(value,meta))+
   geom_density_ridges()+
@@ -139,6 +152,38 @@ plt <- ggplot(p_data, aes(value,meta))+
   ylab("Longitudinal Public Type")+
   xlab("")
 ggsave("img/aud_diff.pdf",plt,h=4,w=10)
+
+# Same figure, with separate densities within each LP type for LPs that
+# carry a "Political" label at all (any of Metalabel1-4) vs. those that
+# don't. Only Local Politics/News has both kinds (6 political, 18 not);
+# all National Politics LPs are political and no Others LPs are.
+# One row per LP, so each LP counts once.
+pol_lab <- infl_w_tweet_count[, .SD[1], by = grp][, .(grp, Political)]
+p_data_pol <- melt(merge(unique(rq2a[, .(grp, meta, age, par_diff, male)]), pol_lab,
+                         by = "grp"),
+                   id = c("grp", "meta", "Political"), c("age", "par_diff", "male"))
+p_data_pol[, variable := factor(variable,
+                                labels=c("Mean Age",
+                                         "% Rep. - % Dem.",
+                                         "% Male"))]
+p_data_pol[, Political := factor(ifelse(Political, "Labeled Political",
+                                        "Not Labeled Political"),
+                                 levels = c("Labeled Political", "Not Labeled Political"))]
+plt_pol <- ggplot(p_data_pol, aes(value, meta, fill = Political))+
+  # vertical line in each density = that group's median
+  stat_density_ridges(geom = "density_ridges", alpha = .5,
+                      quantile_lines = TRUE, quantiles = 2)+
+  # dotted reference line at parity (0) in the partisanship panel only
+  geom_vline(data = data.frame(variable = factor("% Rep. - % Dem.",
+                                                 levels = levels(p_data_pol$variable)),
+                               x = 0),
+             aes(xintercept = x), linetype = "dotted")+
+  facet_grid(.~variable,scales="free_x")+
+  scale_fill_discrete(name = NULL)+
+  ylab("Longitudinal Public Type")+
+  xlab("")+
+  theme(legend.position = "bottom")
+ggsave("img/aud_diff_political.pdf",plt_pol,h=4.5,w=10)
 ########### Temporal heterogeneity
 
 # Overall (pooled) weekly proportions with Agresti-Coull CIs, for the
@@ -259,9 +304,17 @@ p4 <-ggplot(z, aes(t,estimate, ymin=conf.low,
   theme(legend.position='bottom')
 p4
 theme_set(theme_bw(14))
-ggsave("img/rq2a_time.pdf",basic_plt+p4 +
-         plot_layout(widths = c(1.3, 2),axis="collect")&
-         plot_annotation(tag_levels = 'A'),h=5,w=12)
+# Saved as two separate figures (formerly panels A and B of rq2a_time.pdf):
+#   rq2a_time_raw.pdf: observed per-LP overlap over time (black = mean)
+#   rq2a_time_model.pdf: marginal predictions from meta_5 by LP type
+ggsave("img/rq2a_time_raw.pdf", basic_plt + theme_bw(14) +
+         theme(axis.text.x=element_text(angle=45,hjust=1),
+               legend.position='bottom'),
+       h=5,w=6.5)
+ggsave("img/rq2a_time_model.pdf", p4 + theme_bw(14) +
+         theme(axis.text.x=element_text(angle=45,hjust=1),
+               legend.position='bottom'),
+       h=5,w=8.5)
 
 
 
@@ -283,6 +336,12 @@ summ <- ggplot(rq2a_2,
   scale_color_discrete(name="Longitudinal Public Type")
 ggsave("img/rq2.pdf",summ,h=6,w=11)
 
+#########################################
+############### Paper RQ2b: heterogeneity ACROSS longitudinal publics
+#########################################
+# NOTE on naming: this block is RQ2b in the paper (Section 3.3.4 / 4.3,
+# Appendix F, Table F2). The section labelled "RQ2b" further below is RQ2c
+# in the paper.
 ### Adding in demographics
 # Long format: one row per cluster x issue public, with the cluster's
 # audience demographics attached
@@ -307,6 +366,17 @@ anova(base,m3)
 anova(base,m4)
 
 full <- update(base, .~.+(age+poly(par_diff,2)+male+log_n)*issuepublic)
+
+# Base vs. full model test (reported in Section 4.3). The full model adds 10
+# parameters, so the likelihood-ratio test is chi^2(10), not chi^2(1).
+anova(base, full, test="Chisq")
+# The data are heavily overdispersed relative to the binomial (Pearson
+# dispersion ~4,900), which the LR chi^2 test ignores. The quasibinomial
+# F-test rescales by the estimated dispersion and is the test to report.
+sum(residuals(full, "pearson")^2) / df.residual(full)
+anova(update(base, family="quasibinomial"),
+      update(full, family="quasibinomial"),
+      test="F")
 
 library(sandwich)
 library(lmtest)
@@ -351,23 +421,31 @@ avg_predictions(full,
 
 
 
-
+theme_set(theme_bw(13))
 ggsave("img/rq2a_audience.pdf",summ + (ageplt/pardiff_plt) +
          plot_layout(widths = c(2,1.2))&
          plot_annotation(tag_levels = 'A'),h=7,w=11)
 
-# Regression table for the appendix (cluster-robust CIs)
+# Regression table for the appendix (Table F2). Binomial GLMs weighted by
+# total tweets; 95% CIs from cluster-robust SEs by longitudinal public.
+# There are no time/event terms or random effects in these models.
+# Written to table_F2.tex (paste into the paper) and printed.
 library(modelsummary)
-modelsummary(models=list("Base"=base,"Full"=full),
+tab_f2 <- modelsummary(models=list("Base"=base,"Full"=full),
              output='latex_tabular',
              se.below = F,
              estimate="{estimate}{stars}",
              statistic="[{conf.low}, {conf.high}]",
              stars=c("*"=.05, "**"=.001),vcov=~grp)
+writeLines(as.character(tab_f2), "table_F2.tex")
+tab_f2
 
 #################################################
-################# RQ2b #################
+################# RQ2b (code) = RQ2c (paper) #################
 #################################################
+# Heterogeneity WITHIN longitudinal publics: this is RQ2c in the paper
+# (Section 3.3.5 / 4.4, Appendix E.2 and G, Table G3). Object names keep
+# the original "rq2b" prefix.
 
 # Account-level analysis: which influencer characteristics predict overlap
 # with the issue publics? Restrict to accounts with enough tweets and
@@ -403,7 +481,7 @@ basic_demographics <- data.table(
 rq2b <- merge(rq2b, basic_demographics, by.x="id",by.y="influencer_id")
 
 # Approximate random-walk betweenness centrality in the follow network
-cent <- data.table(read_parquet("data/creators_with_centralities_no_zero_weight_edges.parquet"))
+cent <- data.table(read_parquet(CENTRALITY_FILE))
 rq2b <- merge(rq2b, cent, by="id")
 
 
@@ -544,16 +622,42 @@ cor(rq2b[,.(cent_pop,cent_pardiff,cent_age,cent_male,approx_rw_centr)])
 # verified predictions from that refit. All panels are population-averaged
 # (G-computation) with flock-bootstrap percentile CIs. This is the slow
 # step (~R model refits); lower R or n_avg to iterate.
-set.seed(779)
-rq2b_curves <- boot_avg_curves(full_model, rq2b,
-                               c("cent_pop","cent_pardiff","cent_age",
-                                 "cent_male","cent_bet"),
-                               discrete_vars = "verified",
-                               R = 1000)
+# Replicates run in parallel (forked workers; set BOOT_CORES <- 1 on
+# Windows). The L'Ecuyer RNG gives each replicate its own reproducible
+# stream for a given BOOT_CORES.
+#
+# The bootstrap output is cached in BOOT_CACHE, so the figure can be
+# restyled/resized without rerunning it. The cache stores the full model's
+# coefficients and is only reused if they match the current fit (i.e. the
+# data, centrality file, and specification are unchanged); otherwise the
+# bootstrap reruns and overwrites it. Delete the file to force a rerun.
+BOOT_CACHE <- "data/rq2b_boot_curves.rds"
+BOOT_CORES <- max(1, parallel::detectCores() - 2)
+cache_ok <- FALSE
+if (file.exists(BOOT_CACHE)) {
+  boot_cache <- readRDS(BOOT_CACHE)
+  cache_ok <- isTRUE(all.equal(boot_cache$coef, coef(full_model)))
+  if (!cache_ok) message("Bootstrap cache is from a different model fit; rerunning")
+}
+if (cache_ok) {
+  rq2b_curves <- boot_cache$curves
+} else {
+  RNGkind("L'Ecuyer-CMRG")
+  set.seed(779)
+  rq2b_curves <- boot_avg_curves(full_model, rq2b,
+                                 c("cent_pop","cent_pardiff","cent_age",
+                                   "cent_male","cent_bet"),
+                                 discrete_vars = "verified",
+                                 R = 1000, cores = BOOT_CORES)
+  RNGkind("default")
+  saveRDS(list(coef = coef(full_model), curves = rq2b_curves,
+               R = 1000, cores = BOOT_CORES, seed = 779),
+          BOOT_CACHE)
+}
 
 # Verified panel: population-averaged predictions by verified x meta x
 # issue public - same estimand as the curve panels, discrete x-axis
-verified <- ggplot(rq2b_curves[focal == "verified"],
+verified <- ggplot(rq2b_curves[focal == "verified" & meta !="National\nPolitics"],
                    aes(factor(value), estimate, ymin=conf.low, ymax=conf.high,
                        color=meta))+
   geom_pointrange(position=position_dodge(width=.4))+
@@ -571,12 +675,16 @@ pardiff_plt <- plot_rq2b(rq2b_curves,"cent_pardiff","Avg. Audience % Rep. - % De
 age_plt <- plot_rq2b(rq2b_curves,"cent_age","Avg. Audience Age","D")
 male_plt <- plot_rq2b(rq2b_curves,"cent_male","Avg. Audience % Male","E")
 cent_plt <- plot_rq2b(rq2b_curves,"cent_bet","Approx. Bet. Centr.","F")
-theme_set(theme_bw(13))
-
+# Two columns x three rows (panels A-F read left to right, top to bottom),
+# with the shared legend at the bottom
+theme_set(theme_bw(14))
 ggsave("img/rq2b.pdf",
-       (verified+pop_plt+pardiff_plt)/(age_plt+male_plt+cent_plt) +
-         plot_layout(guides='collect')  & plot_annotation(tag_levels = 'A'),
-       h=5,w=13)
+       verified + guides(color = 'none') +
+         pop_plt + pardiff_plt + age_plt + male_plt + cent_plt +
+         plot_layout(ncol = 2, guides = 'collect') +
+         plot_annotation(tag_levels = 'A') &
+         theme(legend.position = 'bottom'),
+       h=11,w=10)
 
 # Fit diagnostics: predicted vs observed for base and full models
 rq2b[, pred_full := predict(full_model)]
@@ -587,24 +695,142 @@ library(GGally)
 ggpairs(sample_n(rq2b[,.(true,pred_full,pred_base)],10000))
 
 
-# Regression table for the appendix
+# Regression table for the appendix (Table G3).
+# vcov = ~grp: cluster-robust SEs by longitudinal public (141 clusters).
+# Without it, fixest clusters on the FIRST fixed effect (`variable`, the
+# issue public), i.e. on only 2 clusters, which gives far too narrow CIs.
+# Clustering by grp also absorbs the substantial overdispersion (Pearson
+# dispersion ~11).
+# Observations = creator x issue-public rows (2 per creator), after the
+# >=5 tweets / >=1000 followers filter, the LP filter, and dropping
+# creators with missing audience demographics.
+# Fit stats: adjusted pseudo R2 (the "adjusted R2" in Section 4.4), within
+# pseudo R2 (the "11.2% of within-public variation"), squared correlation.
+nrow(rq2b); uniqueN(rq2b$id)
+fitstat(full_model, ~ apr2 + wpr2 + sq.cor + rmse)
+# Written to table_G3.tex (paste into the paper) and printed.
+# NOTE: par_diff / cent_pardiff = % Republican - % Democrat, so the label is
+# Rep-Dem (the earlier "Prop.Dem-Prop.Rep" label had the sign backwards).
+g3_dict <- c("value/total"="Proportion of Discourse Overlap",
+             "variable"="Issue Public Type",
+             "grp"="Longitudinal Public ID",
+             "cent_male"="Prop.Male-Prop.Female",
+             "cent_bet"="Approx.Bet.Cent.",
+             "cent_age"="Avg.Age",
+             "poly(cent_pardiff,2)1"="Prop.Rep-Prop.Dem",
+             "poly(cent_pardiff,2)2"="(Prop.Rep-Prop.Dem)$^2$",
+             "cent_pop"="Log(followers/following)",
+             "variableblm"="BLM IP",
+             "variablepol"="Electoral IP",
+             "metaNational\nPolitics"="Nat.Politics LP",
+             "metaOthers"="Other LP",
+             "verifiedTRUE"="IsVerified")
 etable(base,full_model,tex=T,
+       file = "table_G3.tex", replace = TRUE,
+       vcov = ~grp,
+       fitstat = ~ n + apr2 + wpr2 + sq.cor + bic,
        se.below = F,
-       signif.code=c("*"=.001),
+       signif.code=c("**"=.001, "*"=.05),
        coefstat="confint",
-       dict=c("cent_male"="Prop.Male-Prop.Female",
-              "cent_bet"="Approx.Bet.Cent.",
-              "cent_age"="Avg.Age",
-              "poly(cent_pardiff,2)1"="Prop.Dem-Prop.Rep",
-              "poly(cent_pardiff,2)2"="(Prop.Dem-Prop.Rep)$^2$",
-              "cent_pop"="Log(followers/following)",
-              "variableblm"="BLM_IP",
-              "variablepol"="Electoral_IP",
-              "metaNational
-              Politics"="Nat.Politics_LP",
-              "metaOthers"="Other_LP",
-              "verifiedTRUE"="IsVerified"))
+       dict=g3_dict)
+etable(base,full_model,tex=T,
+       vcov = ~grp,
+       fitstat = ~ n + apr2 + wpr2 + sq.cor + bic,
+       se.below = F,
+       signif.code=c("**"=.001, "*"=.05),
+       coefstat="confint",
+       dict=g3_dict)
 
+
+#### Robustness of model selection (Appendix E.3)
+# The stepwise selection above used compare_performance(), i.e. AIC/BIC on
+# the binomial likelihood. That likelihood ignores overdispersion (Pearson
+# dispersion ~11), so we re-check every selection step two ways:
+#   (1) QAIC/QBIC: -2 logLik divided by the estimated dispersion c_hat
+#   (2) Wald F-tests of the added interaction terms, cluster-robust by
+#       longitudinal public (denominator df = #LPs - 1)
+# Result: QAIC/QBIC choose the same model at every step, and the Wald tests
+# support every retained interaction EXCEPT the betweenness x issue public
+# x LP-type 3-way terms (p ~ .17 with the recomputed shared-count
+# centralities; p ~ .23 with the original file). The model is kept as is;
+# the paper notes that exception.
+n_lp <- uniqueN(rq2b$grp)
+c_hat <- sum(resid(full_model, "pearson")^2) /
+  (nobs(full_model) - length(coef(full_model)) - n_lp - 1)
+c_hat
+
+# Main-effect-only alternatives for the steps that went straight to the
+# 3-way interaction
+par_main  <- update(age_mod5, .~.+poly(cent_pardiff,2))
+male_main <- update(pardiff_mod5, .~.+cent_male)
+bet_main  <- update(male_mod5, .~.+cent_bet)
+
+q_ic <- function(m) {
+  k <- length(coef(m)); ll <- as.numeric(logLik(m))
+  c(k = k, QAIC = -2*ll/c_hat + 2*k, QBIC = -2*ll/c_hat + log(nobs(m))*k)
+}
+sel_mods <- list(m2a=m2a, m2b=m2b, m2c=m2c, m2d=m2d,
+                 age_mod1=age_mod1, age_mod2=age_mod2, age_mod3=age_mod3,
+                 age_mod4=age_mod4, age_mod5=age_mod5,
+                 par_main=par_main, pardiff_mod5=pardiff_mod5,
+                 male_main=male_main, male_mod5=male_mod5,
+                 bet_main=bet_main, full_model=full_model)
+round(t(sapply(sel_mods, q_ic)), 1)
+
+# Joint cluster-robust Wald F-test of all coefficients whose names match
+# `pat` (perl regex; (?s) because the LP level "National\nPolitics" contains
+# a newline)
+wald_grp <- function(m, pat, label) {
+  s <- summary(m, cluster = ~grp)
+  b <- coef(s); V <- vcov(s)
+  i <- grep(pat, names(b), perl = TRUE)
+  stat <- as.numeric(t(b[i]) %*% solve(V[i, i]) %*% b[i])
+  data.table(test = label, k = length(i), F = stat/length(i),
+             p = pf(stat/length(i), length(i), n_lp - 1, lower.tail = FALSE))
+}
+any_int <- function(x) paste0("(?s)(?=.*:)(?=.*(", x, "))")
+three_way <- function(x) paste0("(?s)(?=.*variableblm)(?=.*meta)(?=.*(", x, "))")
+rbind(
+  wald_grp(m2b, "(?s)^(verifiedTRUE|cent_pop):meta", "status x LP type (m2b vs m2a)"),
+  wald_grp(m2c, "^(verifiedTRUE|cent_pop):variable", "status x IP (m2c vs m2a)"),
+  wald_grp(m2d, "^(verifiedTRUE|cent_pop):", "all status interactions (m2d vs m2a)"),
+  wald_grp(m2d, three_way("verifiedTRUE|cent_pop"), "status 3-way"),
+  wald_grp(age_mod5, any_int("cent_age"), "all age interactions (age_mod5 vs age_mod1)"),
+  wald_grp(age_mod5, three_way("cent_age"), "age 3-way (age_mod5 vs age_mod4)"),
+  wald_grp(pardiff_mod5, any_int("cent_pardiff"), "all partisanship interactions"),
+  wald_grp(pardiff_mod5, three_way("cent_pardiff"), "partisanship 3-way"),
+  wald_grp(male_mod5, any_int("cent_male"), "all % male interactions"),
+  wald_grp(male_mod5, three_way("cent_male"), "% male 3-way"),
+  wald_grp(full_model, any_int("cent_bet"), "all betweenness interactions"),
+  wald_grp(full_model, three_way("cent_bet"), "betweenness 3-way")
+)
+
+#### National Politics slopes (Section 4.4 text; not shown in Figure 6)
+# Slope of each creator variable for National Politics LPs, per issue public:
+# sum of the main effect and its interactions, with cluster-robust SEs.
+np_slopes <- function(m, x) {
+  s <- summary(m, cluster = ~grp); b <- coef(s); V <- vcov(s)
+  np <- "metaNational\nPolitics"
+  terms <- list(Electoral = c(x, paste0(x, ":", np)),
+                BLM = c(x, paste0(x, ":", np), paste0(x, ":variableblm"),
+                        paste0(x, ":variableblm:", np)))
+  rbindlist(lapply(names(terms), function(ip) {
+    tt <- terms[[ip]]
+    # fixest may order terms differently; match each by its parts
+    idx <- sapply(tt, function(t) {
+      parts <- strsplit(t, ":", fixed = TRUE)[[1]]
+      hit <- which(sapply(strsplit(names(b), ":", fixed = TRUE),
+                          function(n) setequal(n, parts)))
+      stopifnot(length(hit) == 1); hit
+    })
+    w <- rep(1, length(idx))
+    est <- sum(b[idx]); se <- sqrt(as.numeric(t(w) %*% V[idx, idx] %*% w))
+    data.table(var = x, issue_public = ip, est = est, se = se,
+               p = 2*pnorm(-abs(est/se)))
+  }))
+}
+rbindlist(lapply(c("verifiedTRUE", "cent_pop", "cent_male"),
+                 function(x) np_slopes(full_model, x)))
 
 # Robustness check: same full model but with the raw (uncentered) audience
 # variables added, to confirm the contextual effects aren't artifacts of

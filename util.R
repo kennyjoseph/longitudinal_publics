@@ -200,12 +200,17 @@ RQ2B_LABELS <- c(pol="Electoral",blm="BLM")
 #
 # The model must have been fit with weights as a formula (weights=~total) so
 # that update(model, data=...) resolves weights from the resampled data.
-boot_flock <- function(model, dat, FUN, R = 1000){
+#
+# cores > 1 runs replicates in parallel with forked workers
+# (parallel::mclapply; not available on Windows). For reproducibility call
+# RNGkind("L'Ecuyer-CMRG") and set.seed() first: each replicate then gets
+# its own RNG stream, and results are reproducible for a given `cores`.
+boot_flock <- function(model, dat, FUN, R = 1000, cores = 1){
   point <- FUN(model, dat)
   id_cols <- setdiff(names(point), "estimate")
 
-  last_err <- NULL
-  boots <- rbindlist(lapply(seq_len(R), function(i){
+  one_rep <- function(i){
+    if (cores > 1) setFixest_nthreads(1)  # avoid oversubscribing cores
     gs <- sample(unique(dat$grp), replace = TRUE)
     bd <- rbindlist(lapply(seq_along(gs), function(j){
       x <- copy(dat[grp == gs[j]])
@@ -213,17 +218,23 @@ boot_flock <- function(model, dat, FUN, R = 1000){
       x
     }))
     bm <- try(update(model, data = bd), silent = TRUE)
-    if (inherits(bm, "try-error")){
-      last_err <<- conditionMessage(attr(bm, "condition"))
-      return(NULL)
-    }
+    if (inherits(bm, "try-error"))
+      return(conditionMessage(attr(bm, "condition")))
     res <- try(FUN(bm, bd), silent = TRUE)
-    if (inherits(res, "try-error")){
-      last_err <<- conditionMessage(attr(res, "condition"))
-      return(NULL)
-    }
+    if (inherits(res, "try-error"))
+      return(conditionMessage(attr(res, "condition")))
     res[, rep := i]
-  }))
+  }
+  out <- if (cores > 1) {
+    parallel::mclapply(seq_len(R), one_rep, mc.cores = cores,
+                       mc.set.seed = TRUE)
+  } else lapply(seq_len(R), one_rep)
+  # failed replicates come back as an error message (a worker crash as a
+  # try-error from mclapply)
+  is_res <- vapply(out, is.data.table, logical(1))
+  errs <- unlist(lapply(out[!is_res], as.character))
+  last_err <- if (length(errs)) errs[length(errs)] else NULL
+  boots <- rbindlist(out[is_res])
   if (nrow(boots) == 0)
     stop("all ", R, " replicates failed; last error was:\n  ", last_err,
          "\n(a common cause: the model was fit with a weights *vector* - ",
@@ -264,7 +275,7 @@ boot_flock <- function(model, dat, FUN, R = 1000){
 boot_avg_curves <- function(model, dat, varnames,
                             discrete_vars = NULL,
                             R = 1000, grid_n = 20, n_avg = 20000,
-                            grid_probs = c(.005, .995)){
+                            grid_probs = c(.005, .995), cores = 1){
   grids <- lapply(varnames, function(v)
     unname(quantile(dat[[v]], seq(grid_probs[1], grid_probs[2],
                                   length.out = grid_n))))
@@ -298,7 +309,7 @@ boot_avg_curves <- function(model, dat, varnames,
     rbindlist(list(curves, discretes))
   }
 
-  boot_flock(model, dat, FUN, R = R)
+  boot_flock(model, dat, FUN, R = R, cores = cores)
 }
 
 # Plot one variable's curve from a boot_avg_curves() result
@@ -306,18 +317,18 @@ plot_rq2b <- function(boot_res,
                       varname,
                       xlab_name,
                       title_letter = NULL){
-  z <- boot_res[focal == varname]
+  z <- boot_res[focal == varname & meta != "National\nPolitics"]
 
   ggplot(z, aes(x=value,y=estimate,ymin=conf.low,ymax=conf.high,
                 color=meta,fill=meta))+geom_line() +
-    geom_ribbon(alpha=.2,linewidth = 0)+
+    geom_ribbon(alpha=.2,linetype = 0)+
     facet_wrap(~variable,scales="free_y",
                labeller =
                  as_labeller(RQ2B_LABELS))+
-    scale_x_continuous(name=xlab_name)+
-    theme(axis.text.x=element_text(angle=45,hjust=1))+
-    scale_color_discrete(name="Longitudinal\nPublic\nType")+
-    scale_fill_discrete(name="Longitudinal\nPublic\nType")+
+    # ticks one unit apart, so they do not crowd in the 2-column layout
+    scale_x_continuous(name=xlab_name, breaks=scales::breaks_width(1))+
+    scale_color_discrete(name="Longitudinal Public Type")+
+    scale_fill_discrete(name="Longitudinal Public Type")+
     scale_y_continuous(name="",
                        labels=percent)
 }

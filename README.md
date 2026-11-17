@@ -13,13 +13,14 @@ with equivalent data.
 
 **To reproduce the paper's results, run `02_results.R`.** It requires only
 the five files in `data/` described under "Data files" below — not the raw
-panel/voter data. Figures are written to `img/`.
+panel/voter data. Figures are written to `img/`, and Tables F2 and G3 to
+`table_F2.tex` / `table_G3.tex`.
 
 ## Pipeline overview
 
 `00_decahose_keyword_counts.py` collects the tweet data; the `01*` scripts
-create and validate the clustering; `02_results.R` generates the results in
-the paper.
+create and validate the clustering; `03a`/`03b` compute creator betweenness
+centralities; `02_results.R` generates the results in the paper.
 
 ```
 00_decahose_keyword_counts.py  [+ keyword_lists/]
@@ -34,6 +35,12 @@ the paper.
        └─> manual annotation ─> cluster label files
 01c_generate_usr_to_grp_cnt.py
    └─> data/user_to_group_cnt.csv (panelist × cluster follow counts)
+01d_creator_selection_figures.R
+   └─> img/flocksize_set.pdf, img/density_of_influencer_follows.png
+03a_make_creator_projection.py
+   └─> cluster_graphs/cluster_graph_<grp>.json (shared-audience graphs)
+03b_creator_centralities.py
+   └─> data/creators_with_centralities_shared_count.parquet
 (aggregation of the above with the voter file ─> the preloaded files in data/)
 02_results.R
    └─> figures (img/) and results in the paper
@@ -102,13 +109,63 @@ the panelist × cluster attention table from which the cluster-level audience
 statistics were computed. PySpark is used only for scale; the logic is a
 single join + group-by count.
 
+### `01d_creator_selection_figures.R`
+
+Appendix figures on the creator set (reads withheld inputs from
+`data/ignore/`, plus the public Wojcieszak et al. and Mukerjee et al. elite
+lists, downloaded from GitHub):
+
+1. `img/flocksize_set.pdf`: for N = 500, 1,000, …, 7,000 creators per
+   longitudinal public, the share of each external elite list included —
+   the analysis behind the 3,500-per-cluster cutoff.
+2. `img/density_of_influencer_follows.png`: distribution across panelists
+   of the share of all accounts they follow that are creators.
+
+## Betweenness centrality (RQ2c)
+
+### `03a_make_creator_projection.py`
+
+For each longitudinal public, builds the creator–creator shared-audience
+graph: for every pair of creators in the cluster, the number of accounts
+that follow both. Takes the creator list (`id`, `grp`) and the follow edge
+list (`source_id`, `target_id`; withheld) as arguments, and writes
+`cluster_graph_<grp>.json` per cluster.
+
+### `03b_creator_centralities.py`
+
+Computes each creator's approximate current-flow (random-walk) betweenness
+centrality within its longitudinal public's shared-audience graph, and
+writes `data/creators_with_centralities_shared_count.parquet` (`id`,
+`approx_rw_centr`), which `02_results.R` reads (`CENTRALITY_FILE`).
+
+- Edge weight = shared-audience size. In current-flow betweenness weights
+  are conductances, so creators with a larger shared audience are more
+  strongly connected. (`--weighting reciprocal` reproduces an earlier
+  1/shared-audience definition, for comparison.)
+- Implements the same estimator as networkx's
+  `approximate_current_flow_betweenness_centrality`, vectorized in numpy,
+  with `--epsilon 0.1` (~650–820 sampled source/target pairs per cluster;
+  the networkx default of 0.5 samples only ~32) and a fixed `--seed 779`.
+- Edges with zero shared audience are dropped; if a cluster's graph is
+  disconnected, the largest component is used (none were, for the paper).
+- Clusters run in parallel (`--workers`, default CPU count − 2); the full
+  run took ~26 minutes on 10 cores.
+
 ## Analysis
 
 - **`02_results.R` — generates the results in the paper.** Runs entirely
   from the pre-computed files in `data/`; where a preloaded file was derived
   from withheld data, the derivation is documented in comments in this
-  script. Figures go to `img/`, and regression tables are printed to the
-  console as LaTeX.
+  script. Figures go to `img/`; Tables F2 and G3 are written to
+  `table_F2.tex` / `table_G3.tex` (other regression tables are printed to
+  the console as LaTeX). Confidence intervals are clustered by longitudinal
+  public.
+- **Bootstrap for Figure 6 (`img/rq2b.pdf`)**: 1,000 cluster-bootstrap
+  refits of the RQ2c model, run in parallel (`BOOT_CORES`, default CPU
+  count − 2; set to 1 on Windows) with a fixed seed. It takes ~4.5 hours, so
+  its output is cached in `data/rq2b_boot_curves.rds` (committed). The
+  cache is reused only if the fitted model's coefficients match; delete it
+  to force a rerun.
 - `util.R` — shared helpers: data loaders, `cs2` scaling, the event-window
   aggregation (`get_data_from_date`), and the RQ2b plotting helpers.
 
@@ -140,9 +197,16 @@ none contain panelist-level records.
 - **`kenny_influencer_data_new_age_info.parquet`** — per-influencer audience
   demographics: distributions of age, race, party, and gender among the
   panelists following each account (`influencer_id`).
-- **`creators_with_centralities_no_zero_weight_edges.parquet`** — per
-  influencer (`id`): approximate random-walk betweenness centrality
-  (`approx_rw_centr`) in the follow network.
+- **`creators_with_centralities_shared_count.parquet`** — per creator
+  (`id`): approximate current-flow betweenness centrality
+  (`approx_rw_centr`) within its longitudinal public's shared-audience
+  graph, from `03b_creator_centralities.py`. (The earlier
+  `creators_with_centralities_no_zero_weight_edges.parquet`, computed with
+  1/shared-audience weights, can be selected via `CENTRALITY_FILE` at the
+  top of `02_results.R`.)
+
+`data/rq2b_boot_curves.rds` (optional, committed) holds the cached Figure 6
+bootstrap curves; it contains only aggregate predictions.
 
 Note: these files still contain Twitter account IDs (of the public
 influencer accounts, not panelists). They are gitignored pending a decision
@@ -173,4 +237,5 @@ only:
   `fixest`, `performance`, `marginaleffects`, `patchwork`, `binom`,
   `sandwich`, `lmtest`, `modelsummary`, `xtable`, `GGally`, `ggpubr`,
   `ggrepel`, `ggridges`, `mgcv`, `scales`, `glue`, `plyr`, `lubridate`
-- **Python** ≥ 3.9: `pyspark`, `pandas`, `pyarrow`
+- **Python** ≥ 3.9: `pyspark`, `pandas`, `pyarrow`; for the centrality
+  scripts also `numpy`, `scipy`, `polars`, `tqdm`

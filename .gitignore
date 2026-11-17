@@ -14,8 +14,9 @@ data/infl_w_tweet_count.parquet
 data/tweet_counts.parquet
 data/kenny_influencer_data_new_age_info.parquet
 data/creators_with_centralities_no_zero_weight_edges.parquet
+data/creators_with_centralities_shared_count.parquet
 
-# Script outputs containing user IDs (written to the repo root by 00/01/01c)
+# Script outputs containing user IDs (written to the repo root by 00/01/01c/03a)
 influencers.csv
 top_users.csv
 adjacency_mat.csv
@@ -23,6 +24,7 @@ user_to_group_cnt.csv
 user_grp_cnt/
 sept2020/
 agg_res_following/
+cluster_graphs/
 
 # Unsanitized original of 00_decahose_keyword_counts.py (lab-internal paths
 # and exploratory cells with user IDs)
@@ -42,3 +44,9 @@ __pycache__/
 .Rproj.user/
 .Rhistory
 img/
+.positai
+
+# Run logs, R scratch output, and regenerated tables
+data/*.log
+Rplots.pdf
+table_*.tex
